@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import '../database/database_service.dart';
 
 class TelaCadastro extends StatefulWidget {
-  const TelaCadastro({Key? key}) : super(key: key);
+  const TelaCadastro({super.key});
 
   @override
   State<TelaCadastro> createState() => _EstadoTelaCadastro();
@@ -42,9 +43,12 @@ class _EstadoTelaCadastro extends State<TelaCadastro> {
       return;
     }
 
-    final prefs = await SharedPreferences.getInstance();
-    final exists = prefs.getString('user:$username:password');
-    if (exists != null) {
+    final registered = await DatabaseService.instance.registerUser(
+      username: username,
+      password: password,
+      budget: budget,
+    );
+    if (!registered) {
       if (!mounted) return;
       setState(() {
         _error = 'Usuário já existe';
@@ -53,11 +57,6 @@ class _EstadoTelaCadastro extends State<TelaCadastro> {
       return;
     }
 
-    await prefs.setString('user:$username:password', password);
-    await prefs.setDouble('user:$username:budget', budget);
-    await prefs.setDouble('user:$username:spent', 0.0);
-
-    // navigate to control
     if (!mounted) return;
     context.go('/control?username=${Uri.encodeComponent(username)}');
   }

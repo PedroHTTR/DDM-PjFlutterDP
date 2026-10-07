@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import '../database/database_service.dart';
 
 class TelaLogin extends StatefulWidget {
-  const TelaLogin({Key? key}) : super(key: key);
+  const TelaLogin({super.key});
 
   @override
   State<TelaLogin> createState() => _EstadoTelaLogin();
@@ -27,14 +28,14 @@ class _EstadoTelaLogin extends State<TelaLogin> {
       _loading = true;
       _error = null;
     });
-    final prefs = await SharedPreferences.getInstance();
     final username = _usernameCtrl.text.trim();
     final password = _passwordCtrl.text;
-    final stored = prefs.getString('user:$username:password');
-    await Future.delayed(Duration(milliseconds: 300));
+    final user = await DatabaseService.instance.authenticate(
+      username: username,
+      password: password,
+    );
     if (!mounted) return;
-    if (stored != null && stored == password) {
-      // navigate to control and pass username as query param
+    if (user != null) {
       context.go('/control?username=${Uri.encodeComponent(username)}');
     } else {
       setState(() {

@@ -1,13 +1,16 @@
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:go_router/go_router.dart';
+
+import '../database/database_service.dart';
+import '../models/expense.dart';
+import '../models/user.dart';
 
 class TelaControle extends StatefulWidget {
   final String username;
-  const TelaControle({Key? key, required this.username}) : super(key: key);
+
+  const TelaControle({super.key, required this.username});
 
   @override
   State<TelaControle> createState() => _EstadoTelaControle();
@@ -15,13 +18,13 @@ class TelaControle extends StatefulWidget {
 
 class _EstadoTelaControle extends State<TelaControle> {
   double _budget = 0.0;
-  double _spent = 0.0;
   bool _loading = true;
   final _expenseCtrl = TextEditingController();
   final _descriptionCtrl = TextEditingController();
-  final List<Map<String, dynamic>> _expenses = [];
+  final List<Expense> _expenses = [];
   String _selectedCategory = 'Outros';
   String? _message;
+  User? _user;
 
   static const _categories = [
     'Moradia',
@@ -45,9 +48,8 @@ class _EstadoTelaControle extends State<TelaControle> {
     'Outros': Color(0xFF546E7A),
   };
 
-  String get _budgetKey => 'user:${widget.username}:budget';
-  String get _spentKey => 'user:${widget.username}:spent';
-  String get _expensesKey => 'user:${widget.username}:expenses';
+  double get _spent =>
+      _expenses.fold<double>(0, (total, expense) => total + expense.amount);
 
   @override
   void initState() {
@@ -64,23 +66,14 @@ class _EstadoTelaControle extends State<TelaControle> {
 
   Future<void> _loadData() async {
     setState(() => _loading = true);
-    final prefs = await SharedPreferences.getInstance();
-    final budget = prefs.getDouble(_budgetKey) ?? 0.0;
-    final spent = prefs.getDouble(_spentKey) ?? 0.0;
-    final savedExpenses = prefs.getStringList(_expensesKey) ?? [];
-    final expenses = <Map<String, dynamic>>[];
-    for (final item in savedExpenses) {
-      try {
-        final decoded = jsonDecode(item);
-        if (decoded is Map<String, dynamic>) {
-          expenses.add(decoded);
-        }
-      } on FormatException {}
-    }
+    final user = await DatabaseService.instance.getUser(widget.username);
+    final expenses = user == null
+        ? <Expense>[]
+        : await DatabaseService.instance.getExpenses(user.id);
     if (!mounted) return;
     setState(() {
-      _budget = budget;
-      _spent = spent;
+      _user = user;
+      _budget = user?.budget ?? 0.0;
       _expenses
         ..clear()
         ..addAll(expenses);
@@ -92,27 +85,26 @@ class _EstadoTelaControle extends State<TelaControle> {
     final value =
         double.tryParse(_expenseCtrl.text.replaceAll(',', '.')) ?? 0.0;
     if (value <= 0) {
-      setState(() {
-        _message = 'Informe um valor válido';
-      });
+      setState(() => _message = 'Informe um valor válido');
       return;
     }
-    final prefs = await SharedPreferences.getInstance();
-    _spent += value;
-    _expenses.add({
-      'category': _selectedCategory,
-      'description': _descriptionCtrl.text.trim().isEmpty
-          ? _selectedCategory
-          : _descriptionCtrl.text.trim(),
-      'amount': value,
-    });
-    await prefs.setDouble(_spentKey, _spent);
-    await prefs.setStringList(
-      _expensesKey,
-      _expenses.map(jsonEncode).toList(),
+    final user = _user;
+    if (user == null) {
+      setState(() => _message = 'Usuário não encontrado');
+      return;
+    }
+    final description = _descriptionCtrl.text.trim().isEmpty
+        ? _selectedCategory
+        : _descriptionCtrl.text.trim();
+    final expense = await DatabaseService.instance.createExpense(
+      userId: user.id,
+      category: _selectedCategory,
+      description: description,
+      amount: value,
     );
     if (!mounted) return;
     setState(() {
+      _expenses.insert(0, expense);
       _message = 'Despesa adicionada';
       _expenseCtrl.clear();
       _descriptionCtrl.clear();
@@ -120,19 +112,118 @@ class _EstadoTelaControle extends State<TelaControle> {
   }
 
   Future<void> _reset() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble(_spentKey, 0.0);
-    await prefs.remove(_expensesKey);
+    final user = _user;
+    if (user == null) return;
+    await DatabaseService.instance.deleteAllExpenses(user.id);
     if (!mounted) return;
     setState(() {
-      _spent = 0.0;
       _expenses.clear();
       _message = 'Gastos reiniciados';
     });
   }
 
+  Future<void> _deleteExpense(Expense expense) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Excluir despesa?'),
+        content: Text('A despesa "${expense.description}" será excluída.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Excluir'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || expense.id == null || _user == null) return;
+    await DatabaseService.instance.deleteExpense(_user!.id, expense.id!);
+    if (!mounted) return;
+    setState(() {
+      _expenses.removeWhere((item) => item.id == expense.id);
+      _message = 'Despesa excluída';
+    });
+  }
+
+  Future<void> _editExpense(Expense expense) async {
+    final amountCtrl = TextEditingController(
+      text: expense.amount.toStringAsFixed(2),
+    );
+    final descriptionCtrl = TextEditingController(text: expense.description);
+    var category = expense.category;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Editar despesa'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: descriptionCtrl,
+                decoration: const InputDecoration(labelText: 'Descrição'),
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: category,
+                decoration: const InputDecoration(labelText: 'Tipo de despesa'),
+                items: _categories
+                    .map((item) =>
+                        DropdownMenuItem(value: item, child: Text(item)))
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) setDialogState(() => category = value);
+                },
+              ),
+              TextField(
+                controller: amountCtrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Valor'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final amount =
+                    double.tryParse(amountCtrl.text.replaceAll(',', '.'));
+                if (amount == null || amount <= 0 || _user == null) return;
+                final updated = Expense(
+                  id: expense.id,
+                  userId: _user!.id,
+                  category: category,
+                  description: descriptionCtrl.text.trim().isEmpty
+                      ? category
+                      : descriptionCtrl.text.trim(),
+                  amount: amount,
+                  createdAt: expense.createdAt,
+                );
+                await DatabaseService.instance.updateExpense(updated);
+                if (context.mounted) Navigator.pop(context, true);
+              },
+              child: const Text('Salvar'),
+            ),
+          ],
+        ),
+      ),
+    );
+    amountCtrl.dispose();
+    descriptionCtrl.dispose();
+    if (saved != true || !mounted) return;
+    await _loadData();
+    if (!mounted) return;
+    setState(() => _message = 'Despesa atualizada');
+  }
+
   Future<void> _logout() async {
-    // simply go back to login
     if (!mounted) return;
     context.go('/');
   }
@@ -141,9 +232,8 @@ class _EstadoTelaControle extends State<TelaControle> {
   Widget build(BuildContext context) {
     final categoryTotals = <String, double>{};
     for (final expense in _expenses) {
-      final category = expense['category'] as String;
-      final amount = (expense['amount'] as num).toDouble();
-      categoryTotals[category] = (categoryTotals[category] ?? 0) + amount;
+      categoryTotals[expense.category] =
+          (categoryTotals[expense.category] ?? 0) + expense.amount;
     }
     final sortedCategories = categoryTotals.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
@@ -151,10 +241,12 @@ class _EstadoTelaControle extends State<TelaControle> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Controle - ${widget.username}'),
-        actions: [IconButton(onPressed: _logout, icon: Icon(Icons.logout))],
+        actions: [
+          IconButton(onPressed: _logout, icon: const Icon(Icons.logout))
+        ],
       ),
       body: _loading
-          ? Center(child: CircularProgressIndicator())
+          ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
@@ -163,10 +255,10 @@ class _EstadoTelaControle extends State<TelaControle> {
                   Text('Orçamento: R\$ ${_budget.toStringAsFixed(2)}'),
                   Text('Gasto: R\$ ${_spent.toStringAsFixed(2)}'),
                   if (sortedCategories.isNotEmpty) ...[
-                    SizedBox(height: 16),
+                    const SizedBox(height: 16),
                     Text('Distribuição dos gastos',
                         style: Theme.of(context).textTheme.titleMedium),
-                    SizedBox(height: 8),
+                    const SizedBox(height: 8),
                     SizedBox(
                       height: 220,
                       child: CustomPaint(
@@ -178,7 +270,7 @@ class _EstadoTelaControle extends State<TelaControle> {
                         ),
                       ),
                     ),
-                    SizedBox(height: 8),
+                    const SizedBox(height: 8),
                     ...sortedCategories.map((entry) {
                       final categoryPercent =
                           _spent > 0 ? entry.value / _spent : 0.0;
@@ -197,7 +289,7 @@ class _EstadoTelaControle extends State<TelaControle> {
                                     shape: BoxShape.circle,
                                   ),
                                 ),
-                                SizedBox(width: 8),
+                                const SizedBox(width: 8),
                                 Text(entry.key),
                               ],
                             ),
@@ -210,13 +302,14 @@ class _EstadoTelaControle extends State<TelaControle> {
                   ],
                   TextField(
                     controller: _descriptionCtrl,
-                    decoration: InputDecoration(
+                    decoration: const InputDecoration(
                         labelText: 'Descrição (ex: Pagamento do carro)'),
                   ),
-                  SizedBox(height: 8),
+                  const SizedBox(height: 8),
                   DropdownButtonFormField<String>(
                     initialValue: _selectedCategory,
-                    decoration: InputDecoration(labelText: 'Tipo de despesa'),
+                    decoration:
+                        const InputDecoration(labelText: 'Tipo de despesa'),
                     items: _categories
                         .map((category) => DropdownMenuItem(
                             value: category, child: Text(category)))
@@ -224,23 +317,54 @@ class _EstadoTelaControle extends State<TelaControle> {
                     onChanged: (category) =>
                         setState(() => _selectedCategory = category!),
                   ),
-                  SizedBox(height: 8),
+                  const SizedBox(height: 8),
                   TextField(
                     controller: _expenseCtrl,
                     keyboardType:
-                        TextInputType.numberWithOptions(decimal: true),
-                    decoration: InputDecoration(
+                        const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
                         labelText: 'Adicionar despesa (ex: 50.00)'),
                   ),
-                  SizedBox(height: 8),
+                  const SizedBox(height: 8),
                   ElevatedButton(
-                      onPressed: _addExpense, child: Text('Adicionar')),
+                      onPressed: _addExpense, child: const Text('Adicionar')),
                   TextButton(
-                      onPressed: _reset, child: Text('Reiniciar gastos')),
+                      onPressed: _reset, child: const Text('Reiniciar gastos')),
                   if (_message != null) ...[
-                    SizedBox(height: 8),
-                    Text(_message!, style: TextStyle(color: Colors.green)),
-                  ]
+                    const SizedBox(height: 8),
+                    Text(_message!,
+                        style: const TextStyle(color: Colors.green)),
+                  ],
+                  if (_expenses.isNotEmpty) ...[
+                    const SizedBox(height: 20),
+                    Text('Despesas',
+                        style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    ..._expenses.map(
+                      (expense) => Card(
+                        child: ListTile(
+                          title: Text(expense.description),
+                          subtitle: Text(expense.category),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('R\$ ${expense.amount.toStringAsFixed(2)}'),
+                              IconButton(
+                                tooltip: 'Editar',
+                                onPressed: () => _editExpense(expense),
+                                icon: const Icon(Icons.edit),
+                              ),
+                              IconButton(
+                                tooltip: 'Excluir',
+                                onPressed: () => _deleteExpense(expense),
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -297,9 +421,9 @@ class _ExpensesChartPainter extends CustomPainter {
     );
     textPainter.layout();
     textPainter.paint(canvas, center - Offset(textPainter.width / 2, 22));
-    textPainter.text = TextSpan(
+    textPainter.text = const TextSpan(
       text: 'Gasto / Orçamento',
-      style: const TextStyle(fontSize: 11, color: Colors.black54),
+      style: TextStyle(fontSize: 11, color: Colors.black54),
     );
     textPainter.layout();
     textPainter.paint(canvas, center - Offset(textPainter.width / 2, -8));

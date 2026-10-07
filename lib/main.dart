@@ -3,13 +3,16 @@ import 'package:go_router/go_router.dart';
 import 'screens/tela_login.dart';
 import 'screens/tela_cadastro.dart';
 import 'screens/tela_controle.dart';
+import 'database/database_service.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await DatabaseService.instance.initialize();
   runApp(MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  MyApp({Key? key}) : super(key: key);
+  MyApp({super.key});
 
   final _router = GoRouter(
     initialLocation: '/',
